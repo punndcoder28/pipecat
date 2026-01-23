@@ -2,6 +2,7 @@
 pipecat-ai[google,deepgram,cartesia,silero,smallwebrtc]
 pipecat-ai-small-webrtc-prebuilt
 aiortc
+transformers
 
 # FastAPI and server
 fastapi>=0.109.0
