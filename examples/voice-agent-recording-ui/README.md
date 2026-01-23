@@ -183,6 +183,59 @@ The server starts at `http://localhost:8000`:
 - **API Docs**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 
+## Docker Compose (Recommended)
+
+The easiest way to run the application is with Docker Compose:
+
+### 1. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+### 2. Start Services
+
+```bash
+# Start all services (database + backend)
+docker-compose up -d
+
+# View logs
+docker-compose logs -f backend
+
+# Stop services
+docker-compose down
+```
+
+### 3. Access the Application
+
+- **Voice UI**: http://localhost:8000/client
+- **API Docs**: http://localhost:8000/docs
+
+### Docker Compose Services
+
+| Service | Description | Port |
+|---------|-------------|------|
+| `db` | PostgreSQL 16 database | 5432 |
+| `backend` | FastAPI application | 8000 |
+| `migrations` | One-time Alembic migration runner | - |
+
+### Useful Commands
+
+```bash
+# Rebuild after code changes
+docker-compose up -d --build backend
+
+# Run migrations manually
+docker-compose run --rm migrations
+
+# View database
+docker-compose exec db psql -U user -d voice_agent_db
+
+# Reset everything (including data)
+docker-compose down -v
+```
+
 ## Configuration
 
 ### Service Providers
@@ -312,6 +365,8 @@ voice-agent-recording-ui/
 ├── alembic/                   # Database migrations
 ├── storage/recordings/        # Audio file storage
 ├── .env.example              # Example configuration
+├── docker-compose.yml        # Docker Compose configuration
+├── Dockerfile                # Backend container definition
 ├── requirements.txt
 └── pytest.ini
 ```

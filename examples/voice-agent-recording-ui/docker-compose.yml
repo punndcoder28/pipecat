@@ -1,0 +1,92 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: voice-agent-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-voice_agent_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-voice_agent_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Voice Agent Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-agent-backend
+    environment:
+      # Database connection (uses Docker network hostname)
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-voice_agent_db}
+
+      # Server configuration
+      HOST: 0.0.0.0
+      PORT: 8000
+
+      # API Keys (from .env file)
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      # Provider selection
+      STT_PROVIDER: ${STT_PROVIDER:-deepgram}
+      LLM_PROVIDER: ${LLM_PROVIDER:-google}
+      TTS_PROVIDER: ${TTS_PROVIDER:-cartesia}
+
+      # Model configuration
+      LLM_MODEL: ${LLM_MODEL:-}
+      TTS_VOICE_ID: ${TTS_VOICE_ID:-}
+
+      # Storage
+      RECORDINGS_PATH: /app/storage/recordings
+    volumes:
+      # Persist recordings outside container
+      - recordings_data:/app/storage/recordings
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Database migrations (one-time job)
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-agent-migrations
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-voice_agent_db}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  postgres_data:
+    driver: local
+  recordings_data:
+    driver: local
+
+networks:
+  default:
+    name: voice-agent-network
