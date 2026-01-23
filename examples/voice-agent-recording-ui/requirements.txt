@@ -1,8 +1,12 @@
 # Pipecat and its extras
-pipecat-ai[google,deepgram,cartesia,silero,smallwebrtc]
-pipecat-ai-small-webrtc-prebuilt
-aiortc
-transformers
+# - google: Google Gemini LLM
+# - deepgram: Deepgram STT
+# - cartesia: Cartesia TTS
+# - silero: Silero VAD
+# - webrtc: aiortc + opencv-python for WebRTC
+# - local-smart-turn-v3: transformers + onnxruntime for smart turn detection
+# - runner: includes pipecat-ai-small-webrtc-prebuilt UI
+pipecat-ai[google,deepgram,cartesia,silero,webrtc,local-smart-turn-v3,runner]
 
 # FastAPI and server
 fastapi>=0.109.0
