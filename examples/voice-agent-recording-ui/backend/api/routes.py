@@ -26,29 +26,36 @@ from backend.db import SessionStatus, get_db
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 
-@router.get("/sessions", response_model=SessionListResponse)
+@router.get(
+    "/sessions",
+    response_model=SessionListResponse,
+    summary="List all sessions",
+    response_description="Paginated list of session summaries",
+)
 async def list_sessions(
     limit: int = Query(default=50, ge=1, le=100, description="Maximum number of sessions to return"),
     offset: int = Query(default=0, ge=0, description="Number of sessions to skip"),
-    status: Optional[str] = Query(default=None, description="Filter by session status"),
+    status: Optional[str] = Query(
+        default=None,
+        description="Filter by session status",
+        enum=["active", "completed", "error"],
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> SessionListResponse:
     """List all sessions with optional filtering and pagination.
 
-    Retrieves a paginated list of session summaries, optionally filtered
-    by session status.
+    Returns a paginated list of session summaries ordered by creation date
+    (newest first). Use the `status` parameter to filter by session state.
 
-    Args:
-        limit: Maximum number of sessions to return (1-100, default 50).
-        offset: Number of sessions to skip for pagination (default 0).
-        status: Optional filter for session status ('active', 'completed', 'error').
-        db: Database session dependency.
+    **Pagination:**
+    - Use `limit` and `offset` for pagination
+    - Maximum 100 sessions per request
+    - Response includes `total` count for calculating pages
 
-    Returns:
-        SessionListResponse: Paginated list of session summaries with total count.
-
-    Raises:
-        HTTPException: 400 if an invalid status value is provided.
+    **Example:**
+    ```
+    GET /api/sessions?limit=10&offset=0&status=completed
+    ```
     """
     # Build the base query
     query = select(SessionModel)
@@ -84,25 +91,27 @@ async def list_sessions(
     return SessionListResponse(sessions=session_summaries, total=total)
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetail)
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SessionDetail,
+    summary="Get session details",
+    response_description="Complete session information with transcripts, latencies, and freeze events",
+    responses={
+        404: {"description": "Session not found"},
+    },
+)
 async def get_session(
     session_id: UUID,
     db: AsyncSession = Depends(get_db),
 ) -> SessionDetail:
     """Get detailed information about a specific session.
 
-    Retrieves full session details including transcripts, latency
-    measurements, and freeze events.
+    Returns full session details including:
+    - **Transcripts**: All user and assistant messages with timestamps
+    - **Turn latencies**: Response time measurements for each conversation turn
+    - **Freeze events**: Detected periods where the bot stopped responding
 
-    Args:
-        session_id: The unique identifier of the session.
-        db: Database session dependency.
-
-    Returns:
-        SessionDetail: Complete session information with related data.
-
-    Raises:
-        HTTPException: 404 if the session is not found.
+    Use this data to analyze conversation quality and identify performance issues.
     """
     # Query session with eager loading of relationships
     query = (
@@ -127,25 +136,34 @@ async def get_session(
     return SessionDetail.model_validate(session)
 
 
-@router.get("/sessions/{session_id}/audio")
+@router.get(
+    "/sessions/{session_id}/audio",
+    summary="Download session audio",
+    response_description="WAV audio file of the session recording",
+    responses={
+        200: {
+            "content": {"audio/wav": {}},
+            "description": "Audio file stream",
+        },
+        404: {"description": "Session or audio file not found"},
+    },
+)
 async def get_session_audio(
     session_id: UUID,
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
-    """Stream the audio file for a specific session.
+    """Download the audio recording for a specific session.
 
-    Returns the audio recording for the specified session as a
-    downloadable WAV file.
+    Returns the session's audio recording as a WAV file. The audio is recorded
+    in stereo format:
+    - **Left channel**: User audio
+    - **Right channel**: Bot audio
 
-    Args:
-        session_id: The unique identifier of the session.
-        db: Database session dependency.
-
-    Returns:
-        FileResponse: The audio file as a streaming response.
-
-    Raises:
-        HTTPException: 404 if the session or audio file is not found.
+    **Audio specifications:**
+    - Format: WAV (PCM)
+    - Sample rate: 16kHz
+    - Channels: 2 (stereo)
+    - Bit depth: 16-bit
     """
     # Query session to get audio file path
     query = select(SessionModel).where(SessionModel.id == session_id)

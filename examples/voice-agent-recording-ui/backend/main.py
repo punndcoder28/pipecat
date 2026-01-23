@@ -74,12 +74,58 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Voice Agent Recording UI backend shutdown complete")
 
 
+# OpenAPI tags for endpoint organization
+OPENAPI_TAGS = [
+    {
+        "name": "health",
+        "description": "Health check endpoints for monitoring and load balancers.",
+    },
+    {
+        "name": "sessions",
+        "description": "Session management endpoints for listing and retrieving recorded sessions.",
+    },
+    {
+        "name": "webrtc",
+        "description": "WebRTC signaling endpoints for establishing voice connections.",
+    },
+]
+
 # Create FastAPI application with lifespan management
 app = FastAPI(
     title="Voice Agent Recording UI",
-    description="Backend API for voice agent interactions with recording capabilities",
+    description="""
+## Overview
+
+Backend API for voice agent interactions with recording capabilities. This service provides:
+
+- **Real-time voice conversations** via WebRTC with a Pipecat-powered voice agent
+- **Session recording** with audio capture and transcript storage
+- **Turn latency tracking** for performance monitoring
+- **Freeze event detection** for identifying bot response issues
+
+## Architecture
+
+The voice pipeline uses:
+- **Deepgram** for speech-to-text (STT)
+- **Google Gemini** for language model processing (LLM)
+- **Cartesia** for text-to-speech (TTS) with low latency
+- **Silero VAD** with smart turn detection for natural conversation flow
+
+## Getting Started
+
+1. Start a voice session via the WebRTC client at `/client/`
+2. Retrieve recorded sessions via the `/api/sessions` endpoints
+3. Stream audio recordings via `/api/sessions/{id}/audio`
+    """,
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=OPENAPI_TAGS,
+    contact={
+        "name": "Voice Agent Recording UI",
+    },
+    license_info={
+        "name": "BSD 2-Clause License",
+    },
 )
 
 # Store WebRTC connections by pc_id
@@ -117,30 +163,46 @@ async def root() -> RedirectResponse:
     return RedirectResponse(url="/client/")
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["health"],
+    summary="Health check",
+    response_description="Returns healthy status if service is running",
+)
 async def health_check() -> dict[str, str]:
     """Health check endpoint for monitoring and load balancers.
 
-    Returns:
-        dict: Health status of the application.
+    Returns a simple status object indicating the service is operational.
+    Use this endpoint for:
+    - Kubernetes liveness/readiness probes
+    - Load balancer health checks
+    - Monitoring systems
     """
     return {"status": "healthy"}
 
 
-@app.post("/api/offer")
+@app.post(
+    "/api/offer",
+    tags=["webrtc"],
+    summary="WebRTC SDP offer/answer exchange",
+    response_description="SDP answer with peer connection ID",
+)
 async def offer(request: dict, background_tasks: BackgroundTasks):
     """WebRTC signaling endpoint for establishing peer connections.
 
     Handles SDP offer/answer exchange for WebRTC connections. Supports
     both new connections and renegotiation of existing connections.
 
-    Args:
-        request: Dictionary containing 'sdp', 'type', and optionally
-            'pc_id' and 'restart_pc' fields.
-        background_tasks: FastAPI background tasks for running the bot.
+    **Request body:**
+    - `sdp` (str): The SDP offer from the client
+    - `type` (str): The SDP type (typically "offer")
+    - `pc_id` (str, optional): Existing peer connection ID for renegotiation
+    - `restart_pc` (bool, optional): Whether to restart the peer connection
 
-    Returns:
-        dict: SDP answer with pc_id for the WebRTC connection.
+    **Response:**
+    - `sdp` (str): The SDP answer from the server
+    - `type` (str): The SDP type ("answer")
+    - `pc_id` (str): The peer connection ID for subsequent requests
     """
     pc_id = request.get("pc_id")
 
@@ -171,18 +233,25 @@ async def offer(request: dict, background_tasks: BackgroundTasks):
     return answer
 
 
-@app.post("/start")
+@app.post(
+    "/start",
+    tags=["webrtc"],
+    summary="Initialize a new WebRTC session",
+    response_description="Session ID and optional ICE configuration",
+)
 async def start_session(request: Request):
-    """Start a new session for the prebuilt UI.
+    """Initialize a new WebRTC session for the prebuilt UI.
 
-    This endpoint mimics Pipecat Cloud's /start endpoint and is required
-    by the SmallWebRTCPrebuiltUI component.
+    This endpoint creates a new session and returns configuration needed
+    to establish a WebRTC connection. It mimics Pipecat Cloud's /start
+    endpoint for compatibility with the SmallWebRTCPrebuiltUI component.
 
-    Args:
-        request: The incoming request with optional configuration.
+    **Request body (optional):**
+    - `enableDefaultIceServers` (bool): If true, includes default STUN servers
 
-    Returns:
-        dict: Session ID and optional ICE configuration.
+    **Response:**
+    - `sessionId` (str): Unique identifier for the session
+    - `iceConfig` (object, optional): ICE server configuration if requested
     """
     try:
         request_data = await request.json()
@@ -209,6 +278,9 @@ async def start_session(request: Request):
 @app.api_route(
     "/sessions/{session_id}/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    tags=["webrtc"],
+    summary="Session-scoped request proxy",
+    include_in_schema=False,  # Hide from docs as it's an internal endpoint
 )
 async def proxy_session_request(
     session_id: str,
@@ -218,16 +290,8 @@ async def proxy_session_request(
 ):
     """Proxy requests to session-specific endpoints.
 
-    This endpoint handles the prebuilt UI's session-based WebRTC signaling.
-
-    Args:
-        session_id: The session ID from /start.
-        path: The sub-path (e.g., 'api/offer').
-        request: The incoming request.
-        background_tasks: FastAPI background tasks.
-
-    Returns:
-        The proxied response.
+    This internal endpoint handles the prebuilt UI's session-based WebRTC
+    signaling by proxying requests to the appropriate handlers.
     """
     if session_id not in active_sessions:
         return {"error": "Invalid or expired session_id"}, 404
