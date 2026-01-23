@@ -6,11 +6,12 @@ support for real-time voice agent interactions with recording capabilities.
 
 import argparse
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from loguru import logger
@@ -84,6 +85,9 @@ app = FastAPI(
 # Store WebRTC connections by pc_id
 pcs_map: Dict[str, SmallWebRTCConnection] = {}
 
+# Store active sessions for the prebuilt UI
+active_sessions: Dict[str, Dict[str, Any]] = {}
+
 # ICE servers for WebRTC
 ice_servers = [
     IceServer(urls="stun:stun.l.google.com:19302"),
@@ -101,9 +105,6 @@ app.add_middleware(
 
 # Include the API router for session endpoints
 app.include_router(api_router)
-
-# Mount the SmallWebRTC prebuilt UI at /client
-app.mount("/client", SmallWebRTCPrebuiltUI())
 
 
 @app.get("/", include_in_schema=False)
@@ -168,6 +169,83 @@ async def offer(request: dict, background_tasks: BackgroundTasks):
     pcs_map[answer["pc_id"]] = pipecat_connection
 
     return answer
+
+
+@app.post("/start")
+async def start_session(request: Request):
+    """Start a new session for the prebuilt UI.
+
+    This endpoint mimics Pipecat Cloud's /start endpoint and is required
+    by the SmallWebRTCPrebuiltUI component.
+
+    Args:
+        request: The incoming request with optional configuration.
+
+    Returns:
+        dict: Session ID and optional ICE configuration.
+    """
+    try:
+        request_data = await request.json()
+        logger.debug(f"Received start request: {request_data}")
+    except Exception:
+        request_data = {}
+
+    # Generate a new session ID
+    session_id = str(uuid.uuid4())
+    active_sessions[session_id] = request_data
+
+    result = {"sessionId": session_id}
+
+    # Include ICE servers if requested
+    if request_data.get("enableDefaultIceServers"):
+        result["iceConfig"] = {
+            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+        }
+
+    logger.info(f"Started new session: {session_id}")
+    return result
+
+
+@app.api_route(
+    "/sessions/{session_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def proxy_session_request(
+    session_id: str,
+    path: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Proxy requests to session-specific endpoints.
+
+    This endpoint handles the prebuilt UI's session-based WebRTC signaling.
+
+    Args:
+        session_id: The session ID from /start.
+        path: The sub-path (e.g., 'api/offer').
+        request: The incoming request.
+        background_tasks: FastAPI background tasks.
+
+    Returns:
+        The proxied response.
+    """
+    if session_id not in active_sessions:
+        return {"error": "Invalid or expired session_id"}, 404
+
+    if path.endswith("api/offer"):
+        try:
+            request_data = await request.json()
+            return await offer(request_data, background_tasks)
+        except Exception as e:
+            logger.error(f"Failed to handle session offer: {e}")
+            return {"error": "Invalid WebRTC request"}, 400
+
+    logger.debug(f"Unhandled session path: {path}")
+    return {"status": "ok"}
+
+
+# Mount the SmallWebRTC prebuilt UI at /client (must be after route definitions)
+app.mount("/client", SmallWebRTCPrebuiltUI)
 
 
 def main() -> None:

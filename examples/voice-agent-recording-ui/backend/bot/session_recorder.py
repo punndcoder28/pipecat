@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
@@ -167,6 +168,7 @@ class SessionRecorder:
 
     async def _on_audio_data(
         self,
+        processor: AudioBufferProcessor,
         audio_data: bytes,
         sample_rate: int,
         num_channels: int,
@@ -177,6 +179,7 @@ class SessionRecorder:
         the audio data for later storage to a WAV file.
 
         Args:
+            processor: The AudioBufferProcessor instance that triggered the event.
             audio_data: The merged audio data (user + bot) as bytes.
             sample_rate: The sample rate of the audio data.
             num_channels: The number of channels in the audio data.
@@ -233,8 +236,15 @@ class SessionRecorder:
             latency_ms=latency_ms,
             was_interrupted=was_interrupted,
         )
-        self._db_session.add(turn_latency)
-        await self._db_session.commit()
+
+        try:
+            self._db_session.add(turn_latency)
+            await self._db_session.commit()
+        except Exception as e:
+            logger.warning(
+                f"Session {self._session_id}: Failed to save turn latency: {e}"
+            )
+            await self._db_session.rollback()
 
         # Clean up the start time for this turn
         self._turn_start_times.pop(turn_number, None)
@@ -262,8 +272,16 @@ class SessionRecorder:
             timestamp=datetime.now(timezone.utc),
             turn_number=self._current_turn_number,
         )
-        self._db_session.add(transcript)
-        await self._db_session.commit()
+
+        try:
+            self._db_session.add(transcript)
+            await self._db_session.commit()
+        except Exception as e:
+            logger.warning(
+                f"Session {self._session_id}: Failed to save transcript: {e}"
+            )
+            await self._db_session.rollback()
+            return
 
         content_preview = f"{content[:50]}..." if len(content) > 50 else content
         logger.debug(
@@ -330,11 +348,28 @@ class SessionRecorder:
 
         # Update the Session record in the database
         if self._session_record is not None:
-            self._session_record.ended_at = end_time
-            self._session_record.status = SessionStatus.COMPLETED
-            if audio_file_path is not None:
-                self._session_record.audio_file_path = str(audio_file_path)
-            await self._db_session.commit()
+            try:
+                # Refresh the session record in case the session was rolled back
+                await self._db_session.refresh(self._session_record)
+            except Exception:
+                # If refresh fails, re-query the session
+                result = await self._db_session.execute(
+                    select(Session).where(Session.id == self._session_id)
+                )
+                self._session_record = result.scalar_one_or_none()
+
+            if self._session_record is not None:
+                try:
+                    self._session_record.ended_at = end_time
+                    self._session_record.status = SessionStatus.COMPLETED
+                    if audio_file_path is not None:
+                        self._session_record.audio_file_path = str(audio_file_path)
+                    await self._db_session.commit()
+                except Exception as e:
+                    logger.warning(
+                        f"Session {self._session_id}: Failed to update session record: {e}"
+                    )
+                    await self._db_session.rollback()
 
         logger.info(
             f"Session {self._session_id}: Recording stopped at {end_time.isoformat()}"
