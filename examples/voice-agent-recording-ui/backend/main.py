@@ -18,6 +18,7 @@ from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
 
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 
+from backend.api import router as api_router
 from backend.bot.pipeline import run_bot
 from backend.config import get_settings
 from backend.db import close_db, init_db
@@ -97,6 +98,9 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
 )
+
+# Include the API router for session endpoints
+app.include_router(api_router)
 
 # Mount the SmallWebRTC prebuilt UI at /client
 app.mount("/client", SmallWebRTCPrebuiltUI())
