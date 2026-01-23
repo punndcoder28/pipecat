@@ -1,15 +1,20 @@
 """Pipecat voice pipeline for the voice agent recording UI backend.
 
 This module defines the voice processing pipeline that handles:
-- Speech-to-text conversion using Deepgram
-- Language model processing using Google Gemini
-- Text-to-speech synthesis using Cartesia
+- Speech-to-text conversion (configurable: Deepgram)
+- Language model processing (configurable: Google Gemini, OpenAI GPT)
+- Text-to-speech synthesis (configurable: Cartesia)
 - Session recording with audio capture and latency tracking
 - Freeze simulation for testing resilience
 - Transcript and freeze event storage to database
 
 The pipeline is designed for WebRTC-based voice interactions with
 smart turn detection for natural conversation flow.
+
+Service providers can be configured via environment variables:
+- STT_PROVIDER: Speech-to-text provider (default: deepgram)
+- LLM_PROVIDER: Language model provider (default: google, options: openai)
+- TTS_PROVIDER: Text-to-speech provider (default: cartesia)
 """
 
 import uuid
@@ -31,9 +36,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
     UserTurnStoppedMessage,
 )
-from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -41,6 +43,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from backend.bot.freeze_simulator import FreezeSimulatorProcessor
+from backend.bot.services import create_services_from_settings
 from backend.bot.session_recorder import create_session_recorder
 from backend.config import get_settings
 from backend.db import async_session_maker
@@ -139,20 +142,10 @@ async def run_bot(
                 ),
             )
 
-            # Initialize speech-to-text service
-            stt = DeepgramSTTService(api_key=settings.deepgram_api_key)
-
-            # Initialize language model service
-            llm = GoogleLLMService(
-                api_key=settings.google_api_key,
-                model="gemini-2.5-flash",
-            )
-
-            # Initialize text-to-speech service
-            tts = CartesiaTTSService(
-                api_key=settings.cartesia_api_key,
-                voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
-            )
+            # Initialize external services with retry logic based on configuration
+            # Service selection is driven by environment variables (STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER)
+            # Each service factory includes exponential backoff for transient failures
+            stt, llm, tts = await create_services_from_settings(settings)
 
             # Set up conversation context with system prompt
             messages = [
