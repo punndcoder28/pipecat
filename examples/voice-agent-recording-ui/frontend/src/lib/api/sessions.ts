@@ -2,7 +2,7 @@
  * Session API functions and React Query hooks.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient, API_BASE_URL } from './client';
 import { Session, SessionDetail, SessionListResponse } from '@/types/session';
 
@@ -65,4 +65,26 @@ export function useSession(id: string) {
  */
 export function getAudioUrl(sessionId: string): string {
   return `${API_BASE_URL}/api/sessions/${sessionId}/audio`;
+}
+
+/**
+ * Delete a session (soft delete).
+ */
+export async function deleteSession(id: string): Promise<void> {
+  await apiClient.delete(`/api/sessions/${id}`);
+}
+
+/**
+ * React Query mutation hook for deleting a session.
+ */
+export function useDeleteSession() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: deleteSession,
+    onSuccess: () => {
+      // Invalidate sessions list to refetch without the deleted session
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    },
+  });
 }
