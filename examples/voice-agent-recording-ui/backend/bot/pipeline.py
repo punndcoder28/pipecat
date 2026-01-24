@@ -209,14 +209,19 @@ async def run_bot(
                 ]
             )
 
-            # Create pipeline task with metrics enabled and turn observer attached
+            # Create pipeline task with metrics enabled and observers attached
+            # - turn_observer: tracks conversation turns
+            # - latency_observer: tracks response latency (user stop -> bot start)
             task = PipelineTask(
                 pipeline,
                 params=PipelineParams(
                     enable_metrics=True,
                     enable_usage_metrics=True,
                 ),
-                observers=[recorder.get_turn_observer()],
+                observers=[
+                    recorder.get_turn_observer(),
+                    recorder.get_latency_observer(),
+                ],
             )
 
             @transport.event_handler("on_client_connected")

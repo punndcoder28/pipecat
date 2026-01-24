@@ -7,6 +7,7 @@ stereo audio (user on left channel, bot on right channel), tracking conversation
 turns, and storing session metadata in the database.
 """
 
+import time
 import uuid
 import wave
 from datetime import datetime, timezone
@@ -17,11 +18,63 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 
 from backend.config import get_settings
 from backend.db.models import Session, SessionStatus, Transcript, TurnLatency
+
+
+class ResponseLatencyObserver(BaseObserver):
+    """Observer that tracks response latency between user stop and bot start.
+
+    This observer monitors UserStoppedSpeakingFrame and BotStartedSpeakingFrame
+    to calculate the actual response latency - the time between when the user
+    finishes speaking and when the bot starts responding.
+    """
+
+    def __init__(self, **kwargs):
+        """Initialize the response latency observer."""
+        super().__init__(**kwargs)
+        self._user_stopped_time: Optional[float] = None
+        self._pending_latency: Optional[float] = None
+
+        self._register_event_handler("on_response_latency")
+
+    async def on_push_frame(self, data: FramePushed):
+        """Process frame events for latency tracking.
+
+        Args:
+            data: Frame push event data containing the frame and metadata.
+        """
+        if isinstance(data.frame, UserStoppedSpeakingFrame):
+            # Record when user stopped speaking
+            self._user_stopped_time = time.perf_counter()
+            logger.trace("User stopped speaking - recording timestamp for latency calculation")
+        elif isinstance(data.frame, BotStartedSpeakingFrame):
+            # Calculate latency if we have a user stop time
+            if self._user_stopped_time is not None:
+                bot_start_time = time.perf_counter()
+                latency_ms = (bot_start_time - self._user_stopped_time) * 1000.0
+                self._pending_latency = latency_ms
+                self._user_stopped_time = None  # Reset for next turn
+                logger.trace(f"Bot started speaking - response latency: {latency_ms:.2f}ms")
+                await self._call_event_handler("on_response_latency", latency_ms)
+
+    def get_and_clear_pending_latency(self) -> Optional[float]:
+        """Get the pending latency value and clear it.
+
+        Returns:
+            The latency in milliseconds, or None if no latency was recorded.
+        """
+        latency = self._pending_latency
+        self._pending_latency = None
+        return latency
 
 
 class SessionRecorder:
@@ -72,6 +125,7 @@ class SessionRecorder:
         # Turn tracking state
         self._current_turn_number: int = 0
         self._turn_start_times: Dict[int, float] = {}
+        self._pending_response_latency: Optional[float] = None
 
         # Create the AudioBufferProcessor with stereo output
         # User audio on left channel, bot audio on right channel
@@ -84,12 +138,18 @@ class SessionRecorder:
         # Create the TurnTrackingObserver for monitoring conversation turns
         self._turn_observer = TurnTrackingObserver()
 
+        # Create the ResponseLatencyObserver for tracking actual response latency
+        self._latency_observer = ResponseLatencyObserver()
+
         # Register event handler for audio data
         self._audio_processor.event_handler("on_audio_data")(self._on_audio_data)
 
         # Register event handlers for turn tracking
         self._turn_observer.event_handler("on_turn_started")(self._on_turn_started)
         self._turn_observer.event_handler("on_turn_ended")(self._on_turn_ended)
+
+        # Register event handler for response latency
+        self._latency_observer.event_handler("on_response_latency")(self._on_response_latency)
 
         logger.info(
             f"SessionRecorder initialized for session {session_id} "
@@ -166,6 +226,17 @@ class SessionRecorder:
         """
         return self._turn_observer
 
+    def get_latency_observer(self) -> ResponseLatencyObserver:
+        """Get the ResponseLatencyObserver instance.
+
+        This observer should be attached to the Pipecat pipeline to track
+        the actual response latency between user speech end and bot speech start.
+
+        Returns:
+            The ResponseLatencyObserver instance managed by this recorder.
+        """
+        return self._latency_observer
+
     async def _on_audio_data(
         self,
         processor: AudioBufferProcessor,
@@ -190,6 +261,25 @@ class SessionRecorder:
             f"(total: {len(self._audio_data)} bytes)"
         )
 
+    async def _on_response_latency(
+        self,
+        observer: ResponseLatencyObserver,
+        latency_ms: float,
+    ) -> None:
+        """Handle response latency events from the ResponseLatencyObserver.
+
+        Stores the response latency (time between user stop speaking and bot
+        start speaking) to be used when the turn ends.
+
+        Args:
+            observer: The ResponseLatencyObserver instance that triggered the event.
+            latency_ms: The response latency in milliseconds.
+        """
+        self._pending_response_latency = latency_ms
+        logger.debug(
+            f"Session {self._session_id}: Response latency recorded: {latency_ms:.2f}ms"
+        )
+
     async def _on_turn_started(
         self,
         observer: TurnTrackingObserver,
@@ -206,6 +296,8 @@ class SessionRecorder:
         """
         self._current_turn_number = turn_number
         self._turn_start_times[turn_number] = datetime.now(timezone.utc).timestamp()
+        # Reset pending latency for new turn
+        self._pending_response_latency = None
         logger.debug(f"Session {self._session_id}: Turn {turn_number} started")
 
     async def _on_turn_ended(
@@ -217,19 +309,31 @@ class SessionRecorder:
     ) -> None:
         """Handle turn ended events from the TurnTrackingObserver.
 
-        Creates a TurnLatency record in the database with the turn duration
-        and interruption status.
+        Creates a TurnLatency record in the database with the actual response
+        latency (time between user stop speaking and bot start speaking) and
+        interruption status.
 
         Args:
             observer: The TurnTrackingObserver instance that triggered the event.
             turn_number: The sequential turn number that ended.
-            duration: The duration of the turn in seconds.
+            duration: The total duration of the turn in seconds (not used for latency).
             was_interrupted: Whether the turn was interrupted by the user.
         """
-        # Convert duration from seconds to milliseconds
-        latency_ms = duration * 1000.0
+        # Use the actual response latency if available, otherwise skip
+        # The response latency is the time between user stop speaking and bot start speaking
+        latency_ms = self._pending_response_latency
 
-        # Create TurnLatency record
+        if latency_ms is None:
+            logger.debug(
+                f"Session {self._session_id}: Turn {turn_number} ended without "
+                "response latency data (first turn or no bot response)"
+            )
+            # Clean up
+            self._turn_start_times.pop(turn_number, None)
+            self._pending_response_latency = None
+            return
+
+        # Create TurnLatency record with actual response latency
         turn_latency = TurnLatency(
             session_id=self._session_id,
             turn_number=turn_number,
@@ -246,13 +350,14 @@ class SessionRecorder:
             )
             await self._db_session.rollback()
 
-        # Clean up the start time for this turn
+        # Clean up
         self._turn_start_times.pop(turn_number, None)
+        self._pending_response_latency = None
 
         status = "interrupted" if was_interrupted else "completed"
         logger.debug(
             f"Session {self._session_id}: Turn {turn_number} {status} "
-            f"(duration={latency_ms:.2f}ms)"
+            f"(response_latency={latency_ms:.2f}ms, total_duration={duration*1000:.2f}ms)"
         )
 
     async def add_transcript(self, role: str, content: str) -> None:
