@@ -8,7 +8,7 @@ import os
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from backend.api.schemas import (
 )
 from backend.db import Session as SessionModel
 from backend.db import SessionStatus, get_db
+from backend.db.models import utc_now
 
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -57,9 +58,9 @@ async def list_sessions(
     GET /api/sessions?limit=10&offset=0&status=completed
     ```
     """
-    # Build the base query
-    query = select(SessionModel)
-    count_query = select(func.count(SessionModel.id))
+    # Build the base query - exclude soft-deleted sessions
+    query = select(SessionModel).where(SessionModel.deleted_at.is_(None))
+    count_query = select(func.count(SessionModel.id)).where(SessionModel.deleted_at.is_(None))
 
     # Apply status filter if provided
     if status is not None:
@@ -194,3 +195,46 @@ async def get_session_audio(
         media_type="audio/wav",
         filename=f"session_{session_id}.wav",
     )
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a session",
+    response_description="Session successfully deleted",
+    responses={
+        204: {"description": "Session successfully deleted"},
+        404: {"description": "Session not found"},
+    },
+)
+async def delete_session(
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Soft delete a session by setting its deleted_at timestamp.
+
+    The session is not physically removed from the database but marked as
+    deleted. Deleted sessions will not appear in list queries.
+
+    Returns 204 No Content on successful deletion.
+    """
+    # Query session to verify it exists and is not already deleted
+    query = select(SessionModel).where(
+        SessionModel.id == session_id,
+        SessionModel.deleted_at.is_(None),
+    )
+
+    result = await db.execute(query)
+    session = result.scalar_one_or_none()
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session with id '{session_id}' not found",
+        )
+
+    # Set deleted_at timestamp
+    session.deleted_at = utc_now()
+    await db.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

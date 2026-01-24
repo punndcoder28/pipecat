@@ -63,6 +63,7 @@ class Session(Base):
         ended_at: When the session ended (None if still active).
         audio_file_path: Path to the recorded audio file.
         status: Current state of the session.
+        deleted_at: When the session was soft-deleted (None if not deleted).
         transcripts: Related transcript entries.
         turn_latencies: Related latency measurements.
         freeze_events: Related freeze detection events.
@@ -92,6 +93,10 @@ class Session(Base):
         Enum(SessionStatus, name="session_status", native_enum=False),
         default=SessionStatus.ACTIVE,
         nullable=False,
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     # Relationships
